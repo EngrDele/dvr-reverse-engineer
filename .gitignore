@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+ENV/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large Buffers
+elen1
+zlog
+
+# Project specific
+*.jpg
+*.png
+*.mp4
+*.txt
