@@ -59,4 +59,12 @@ The camera exposes a standard USB Mass Storage interface (`ELEN1` firmware). By 
 3. `StartRecord` (Command 1)
 4. Read frames using `Read10` SCSI commands.
 
-For more information, see the `dvr_app/` folder which contains decompiled sources and research regarding the original `uCarDvr` APK behavior.
+## Original Android Application (`uCarDvr`)
+The original Android application uses a native C++ library (`libUSBCam.so`) combined with Java wrappers (`CameraDriver.java`, `UsbCamera.java`) to establish the USB Bulk Transfer connection to the camera.
+
+The decompiled application code is available in the `dvr_app/` directory for educational purposes and further research. The original app was found to:
+- Use a hardcoded MJPEG Server on port `1101`.
+- Lack standard CORS headers, making it impossible to embed the stream in modern web browsers natively.
+- Use non-standard boundaries (`--boundary`) instead of the required `dvr-stream-boundary` format for MJPEG.
+
+This Python bridge was created to solve these limitations and bring standard NVR IP camera functionality to the device.
