@@ -47,6 +47,7 @@ current_frame = None       # Latest JPEG bytes
 frame_lock = threading.Lock()
 frame_count = 0
 fps_value = 0.0
+start_time = time.time()
 
 # ═══════════════════════════════════════════════════════════
 #  USB / SCSI / WCM  (proven v21 code)
@@ -116,17 +117,31 @@ def capture_one_frame(dev):
 # ═══════════════════════════════════════════════════════════
 #  HTTP Server (MJPEG stream + snapshot + web UI)
 # ═══════════════════════════════════════════════════════════
+MJPEG_BOUNDARY = 'dvr-stream-boundary'
+
 class CamHandler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass  # Suppress HTTP logs
 
+    def _cors(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', '*')
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors()
+        self.end_headers()
+
     def do_GET(self):
-        if self.path == '/stream':
+        if self.path == '/stream' or self.path == '/video':
             self.send_response(200)
             self.send_header('Content-Type',
-                             'multipart/x-mixed-replace; boundary=frame')
-            self.send_header('Cache-Control', 'no-store')
-            self.send_header('Access-Control-Allow-Origin', '*')
+                             'multipart/x-mixed-replace; boundary=' + MJPEG_BOUNDARY)
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Connection', 'keep-alive')
+            self._cors()
             self.end_headers()
             prev = None
             try:
@@ -135,7 +150,7 @@ class CamHandler(BaseHTTPRequestHandler):
                         f = current_frame
                     if f and f is not prev:
                         prev = f
-                        self.wfile.write(b'--frame\r\n')
+                        self.wfile.write(('--' + MJPEG_BOUNDARY + '\r\n').encode())
                         self.wfile.write(b'Content-Type: image/jpeg\r\n')
                         self.wfile.write(b'Content-Length: ' + str(len(f)).encode() + b'\r\n\r\n')
                         self.wfile.write(f)
@@ -145,26 +160,43 @@ class CamHandler(BaseHTTPRequestHandler):
             except:
                 pass
 
-        elif self.path.startswith('/snapshot'):
+        elif self.path.startswith('/snapshot') or self.path.startswith('/shot') or self.path.startswith('/jpg'):
             with frame_lock:
                 f = current_frame
             if f:
                 self.send_response(200)
                 self.send_header('Content-Type', 'image/jpeg')
                 self.send_header('Content-Length', str(len(f)))
+                self.send_header('Content-Disposition', 'inline; filename="snapshot.jpg"')
                 self.send_header('Cache-Control', 'no-store')
+                self._cors()
                 self.end_headers()
                 self.wfile.write(f)
             else:
-                self.send_error(503)
+                self.send_response(503)
+                self.send_header('Retry-After', '3')
+                self._cors()
+                self.end_headers()
+                self.wfile.write(b'Camera initializing, retry in 3s')
 
-        elif self.path == '/status':
-            s = json.dumps({'connected': current_frame is not None,
-                            'fps': round(fps_value, 1),
-                            'frames': frame_count}).encode()
+        elif self.path == '/status' or self.path == '/api/health':
+            s = json.dumps({
+                'connected': current_frame is not None,
+                'fps': round(fps_value, 1),
+                'frames': frame_count,
+                'resolution': '1280x720',
+                'encoding': 'MJPEG',
+                'uptime_seconds': int(time.time() - start_time) if 'start_time' in dir() else 0,
+                'endpoints': {
+                    'stream': '/stream',
+                    'snapshot': '/snapshot',
+                    'onvif': 'http://{}:{}/onvif'.format(get_local_ip(), ONVIF_PORT)
+                }
+            }).encode()
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', str(len(s)))
+            self._cors()
             self.end_headers()
             self.wfile.write(s)
 
@@ -313,8 +345,16 @@ def onvif_service_thread():
             elif 'GetSystemDateAndTime' in body:
                 t = time.gmtime()
                 r = env.format('<tds:GetSystemDateAndTimeResponse><tds:SystemDateAndTime><tt:UTCDateTime><tt:Time><tt:Hour>{}</tt:Hour><tt:Minute>{}</tt:Minute><tt:Second>{}</tt:Second></tt:Time><tt:Date><tt:Year>{}</tt:Year><tt:Month>{}</tt:Month><tt:Day>{}</tt:Day></tt:Date></tt:UTCDateTime></tds:SystemDateAndTime></tds:GetSystemDateAndTimeResponse>'.format(t.tm_hour, t.tm_min, t.tm_sec, t.tm_year, t.tm_mon, t.tm_mday))
+            elif 'GetServices' in body:
+                xaddr = 'http://{}:{}/onvif'.format(ip, ONVIF_PORT)
+                r = env.format('<tds:GetServicesResponse><tds:Service><tds:Namespace>http://www.onvif.org/ver10/device/wsdl</tds:Namespace><tds:XAddr>{0}</tds:XAddr></tds:Service><tds:Service><tds:Namespace>http://www.onvif.org/ver10/media/wsdl</tds:Namespace><tds:XAddr>{0}</tds:XAddr></tds:Service></tds:GetServicesResponse>'.format(xaddr))
+            elif 'GetVideoSources' in body:
+                r = env.format('<trt:GetVideoSourcesResponse><trt:VideoSources token="vs1"><tt:Framerate>20</tt:Framerate><tt:Resolution><tt:Width>1280</tt:Width><tt:Height>720</tt:Height></tt:Resolution></trt:VideoSources></trt:GetVideoSourcesResponse>')
+            elif 'GetScopes' in body:
+                r = env.format('<tds:GetScopesResponse><tds:Scopes><tt:ScopeDef>Fixed</tt:ScopeDef><tt:ScopeItem>onvif://www.onvif.org/Profile/Streaming</tt:ScopeItem></tds:Scopes><tds:Scopes><tt:ScopeDef>Fixed</tt:ScopeDef><tt:ScopeItem>onvif://www.onvif.org/name/USB-DVR-CAM</tt:ScopeItem></tds:Scopes></tds:GetScopesResponse>')
             else:
-                r = env.format('<tds:GetCapabilitiesResponse><tds:Capabilities><tt:Media><tt:XAddr>http://{}:{}/onvif</tt:XAddr></tt:Media></tds:Capabilities></tds:GetCapabilitiesResponse>'.format(ip, ONVIF_PORT))
+                xaddr = 'http://{}:{}/onvif'.format(ip, ONVIF_PORT)
+                r = env.format('<tds:GetCapabilitiesResponse><tds:Capabilities><tt:Device><tt:XAddr>{0}</tt:XAddr></tt:Device><tt:Media><tt:XAddr>{0}</tt:XAddr><tt:StreamingCapabilities><tt:RTPMulticast>false</tt:RTPMulticast><tt:RTP_TCP>false</tt:RTP_TCP><tt:RTP_RTSP_TCP>false</tt:RTP_RTSP_TCP></tt:StreamingCapabilities></tt:Media></tds:Capabilities></tds:GetCapabilitiesResponse>'.format(xaddr))
             rb = r.encode()
             self.send_response(200)
             self.send_header('Content-Type', 'application/soap+xml')
