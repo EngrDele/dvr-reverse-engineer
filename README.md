@@ -1,75 +1,62 @@
-# Generic DVR Dashcam Reverse Engineering & Network Bridge
+# DVR Network Bridge
 
-This repository contains the results of a deep-dive reverse engineering project into a proprietary "Generic Android Dashcam" (commonly sold with the `uCarDVR` app). 
+A robust, cross-platform Python bridge that converts cheap USB Dashcams (specifically those enumerating as `CAR_DVR / USB-MSDC DISK A` with VID `0x1B3F` and PID `0x8301`) into fully standard network IP cameras.
 
-We have successfully deciphered the undocumented **SCSI-over-USB protocol** used to control the device and extract high-definition video frames without using the original Android application. This bridge allows you to turn a cheap $20 USB dashcam into a standard, headless IP camera compatible with any NVR software (like Frigate, Blue Iris, or Agent DVR).
+These dashcams use a proprietary SCSI-over-USB protocol designed to be read by specific Android apps. This project reverse-engineers that protocol and serves the MJPEG frames over a standard HTTP interface with full NVR integration (Blue Iris, Home Assistant, Agent DVR).
 
----
+## Features
+- **Standard MJPEG Stream**: Serves video on `http://<IP>:9090/stream` (with correct boundaries and CORS headers).
+- **Snapshot Support**: Fetch a single frame via `http://<IP>:9090/snapshot`.
+- **ONVIF Auto-Discovery**: Built-in WS-Discovery server on port `3702` so standard NVRs can auto-detect the camera on your local network.
+- **Linux Robustness**: Uses `sysfs` driver unbinding and `tmux` to ensure the SCSI stream works seamlessly on headless Linux and ARM boards (Raspberry Pi, Orange Pi, Ubuntu).
 
-## 🚀 The Breakthrough: SCSI Command Injection
+## Deployment
 
-The most interesting discovery of this project was how the manufacturer implemented a command channel on a standard "Mass Storage" device without writing a custom USB driver.
+### Linux / Ubuntu / Raspberry Pi (Headless)
+The easiest way to set this up on a headless Linux device is to use the included One-Command Setup script. This installs dependencies (Python, libusb, tmux), configures the USB handling, and sets up a `systemd` service to automatically start the bridge when the device boots.
 
-The device communicates by encoding 4-bit **nibbles** into the `Transfer Length` field of standard SCSI `READ(10)` commands directed at a specific disk offset (**LBA 4851**). By reading from the disk at various "magic" lengths, the host sends commands; the device then places JPEG video frames at a different offset (**LBA 4351**).
+```bash
+git clone https://github.com/EngrDele/dvr-reverse-engineer.git
+cd dvr-reverse-engineer
+sudo bash linux_setup.sh
+```
 
----
+**Commands:**
+- View Live Console: `sudo tmux attach-session -t dvr-bridge` (Press `Ctrl+B` then `D` to detach)
+- View Logs: `sudo journalctl -u dvr-bridge -f`
+- Stop Service: `sudo systemctl stop dvr-bridge`
 
-## 🛠️ Features
+### Windows (Desktop)
+On Windows, you must install the `WinUSB` driver for the camera so that Python can communicate with it directly without the OS Mass Storage driver getting in the way.
 
-- **Headless Network Bridge**: Exposes the proprietary USB stream as standard MJPEG and ONVIF.
-- **Auto-Discovery**: Support for WS-Discovery, allowing NVRs to find the camera automatically.
-- **Self-Healing**: Automatic hardware reset (`dev.reset()`) if the camera's internal buffer stalls.
-- **Cross-Platform**: Tested and working on **Windows 10/11** and **Ubuntu Linux**.
-- **Web Dashboard**: Simple dark-mode UI to monitor the stream and system status.
+1. Download and run [Zadig](https://zadig.akeo.ie/).
+2. Select **Options > List All Devices**.
+3. Select `USB-MSDC DISK A` (VID 1B3F, PID 8301).
+4. Replace the driver with **WinUSB**.
+5. Install dependencies and run:
 
----
+```powershell
+pip install pyusb opencv-python
+python bridge/usb_network_camera.py
+```
 
-## 📥 Installation
+## Integration with NVRs
 
-### Prerequisites
-- Python 3.8+
-- libusb-1.0 (included for Windows in `vendor/`)
+### Home Assistant
+Add a new **Generic Camera** integration:
+- Still Image URL: `http://<IP>:9090/snapshot`
+- Stream Source URL: `http://<IP>:9090/stream`
 
-### Windows Setup
-1. **Driver Setup**: Use [Zadig](https://zadig.akeo.ie/) to replace the default "USB Mass Storage" driver with **WinUSB**. This allows Python to talk to the hardware directly.
-2. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. **Run**: Double-click `bridge/run_dashcam_bridge.bat`.
+### Blue Iris / Agent DVR
+The camera should appear automatically in your network scan via ONVIF. If adding manually:
+- IP/URL: `http://<IP>:9090/stream`
+- Type: `MJPEG Stream`
 
-### Linux (Ubuntu) Setup
-1. **Permissions**: Create a udev rule to allow non-root access to the camera:
-   ```bash
-   echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="1b3f", ATTR{idProduct}=="8301", MODE="0666"' | sudo tee /etc/udev/rules.d/99-dashcam.rules
-   sudo udevadm control --reload-rules && sudo udevadm trigger
-   ```
-2. **Install dependencies**:
-   ```bash
-   sudo apt install python3-usb libusb-1.0-0
-   pip3 install -r requirements.txt
-   ```
-3. **Run**:
-   ```bash
-   python3 bridge/usb_network_camera.py
-   ```
+## Technical Details (Reverse Engineering)
+The camera exposes a standard USB Mass Storage interface (`ELEN1` firmware). By sending a specific sequence of SCSI Command Block Wrappers (CBW), the device is switched into streaming mode:
+1. `GetStatus` (Command 9)
+2. `SetDateTime` (Command 19)
+3. `StartRecord` (Command 1)
+4. Read frames using `Read10` SCSI commands.
 
----
-
-## 📂 Repository Structure
-
-- `bridge/`: Production-ready bridge scripts and launchers.
-- `research/`: Detailed analysis reports, protocol specs, and lessons learned.
-- `tools/`: Diagnostic utilities for hardware probing.
-- `firmware/`: The original target APK for reference.
-- `vendor/`: Pre-compiled drivers for Windows portability.
-
----
-
-## 🎓 Lessons Learned
-For a deep dive into the reverse engineering methodology used (JNI tracing, native library disassembly, and USB forensics), see [research/lessons_learned.md](research/lessons_learned.md).
-
----
-
-## ⚖️ License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+For more information, see the `dvr_app/` folder which contains decompiled sources and research regarding the original `uCarDvr` APK behavior.

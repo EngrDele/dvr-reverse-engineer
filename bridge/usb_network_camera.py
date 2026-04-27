@@ -378,6 +378,32 @@ def main():
     print("  USB CAR DVR — Network Camera Bridge")
     print("=" * 58)
 
+    # On Linux, forcefully rebind then unbind the usb-storage driver BEFORE finding the device.
+    import subprocess as _sp
+    try:
+        _sp.run(["modprobe", "usb-storage"], capture_output=True)
+        result = _sp.run(["find", "/sys/bus/usb/devices", "-maxdepth", "1", "-name", "1-*", "-o", "-name", "2-*", "-o", "-name", "3-*"],
+                         capture_output=True, text=True)
+        for path in result.stdout.strip().split("\n"):
+            if not path: continue
+            try:
+                vid = open(path + "/idVendor").read().strip()
+                pid = open(path + "/idProduct").read().strip()
+                if vid == "1b3f" and pid == "8301":
+                    devpath = path.split("/")[-1]
+                    try:
+                        open("/sys/bus/usb/drivers/usb-storage/unbind", "w").write(devpath + ":1.0")
+                        print("  Unbound usb-storage via sysfs for", devpath)
+                    except:
+                        pass
+                    break
+            except:
+                continue
+    except:
+        pass  # Not Linux or no sysfs
+
+    time.sleep(1)
+
     # Connect with retry
     be = usb.backend.libusb1.get_backend()
     dev = None
@@ -394,41 +420,47 @@ def main():
         return
 
     def configure_device(device):
-        """Detaches Linux kernel drivers (usb-storage) and sets USB config."""
+        """Detaches Linux kernel drivers (usb-storage) and explicitly claims interface."""
         try:
-            # For Linux: detach kernel driver if active
-            for cfg in device:
-                for intf in cfg:
-                    if device.is_kernel_driver_active(intf.bInterfaceNumber):
-                        try:
-                            device.detach_kernel_driver(intf.bInterfaceNumber)
-                        except usb.core.USBError as e:
-                            print("  [Warning] Could not detach kernel driver: {}".format(e))
+            if device.is_kernel_driver_active(0):
+                device.detach_kernel_driver(0)
+                print("  Detached kernel usb-storage driver")
+                time.sleep(0.5)
         except NotImplementedError:
-            pass # is_kernel_driver_active is not implemented on Windows
-        except Exception:
-            pass
-            
+            pass  # Windows
+        # Explicitly claim the interface
         try:
-            device.set_configuration()
+            usb.util.claim_interface(device, 0)
         except:
             pass
 
     configure_device(dev)
+
     clear_halt(dev)
 
     # INQUIRY
-    try:
-        cdb = bytes([0x12, 0, 0, 0, 0x24, 0])
-        dev.write(EP_OUT, cbw(36, cdb), timeout=TIMEOUT)
-        r = bytes(dev.read(EP_IN, 36, timeout=TIMEOUT))
-        try: dev.read(EP_IN, 13, timeout=TIMEOUT)
-        except: pass
-        vendor = r[8:16].decode('ascii', errors='replace').strip()
-        product = r[16:32].decode('ascii', errors='replace').strip()
-        print("  Camera: {} / {}".format(vendor, product))
-    except Exception as e:
-        print("  Camera found but INQUIRY failed: {}".format(e))
+    # INQUIRY
+    vendor, product = "", ""
+    inquiry_success = False
+    for attempt in range(3):
+        try:
+            cdb = bytes([0x12, 0, 0, 0, 0x24, 0])
+            dev.write(EP_OUT, cbw(36, cdb), timeout=TIMEOUT)
+            r = bytes(dev.read(EP_IN, 36, timeout=TIMEOUT))
+            try: dev.read(EP_IN, 13, timeout=TIMEOUT)
+            except: pass
+            vendor = r[8:16].decode('ascii', errors='replace').strip()
+            product = r[16:32].decode('ascii', errors='replace').strip()
+            print("  Camera: {} / {}".format(vendor, product))
+            inquiry_success = True
+            break
+        except Exception as e:
+            print("  INQUIRY attempt {} failed: {}".format(attempt + 1, e))
+            clear_halt(dev)
+            time.sleep(1)
+            
+    if not inquiry_success:
+        print("  Camera found but INQUIRY failed.")
         print("  Unplug camera for 5 seconds, replug, then restart.")
         return
 
